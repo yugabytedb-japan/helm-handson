@@ -25,6 +25,7 @@ YugabyteDB Anywhere (YBA)は、YugabyteDBが提供するセルフマネージド
 * インターネット接続可能な端末
 * 既存のK8S Cluster（Nodeリソースは最低8 Core, 16 GB RAM, 250GB Storage）
 * Helmインストール済み
+* AWS EKSを利用する場合、こちらの[リンク](https://docs.aws.amazon.com/eks/latest/userguide/csi-iam-role.html)を参照し、Amazon EBS CSI pluginが正確にインストールしているかどうかを確認してください。
 
 ## Pre-Flight Check
 Duration: 03:00
@@ -73,17 +74,24 @@ helm version
 version.BuildInfo{Version:"v3.13.2", GitCommit:"2a2fb3b98829f1e0be6fb18af2f6599e0f4e8243", GitTreeState:"clean", GoVersion:"go1.21.4"}
 ```
 
-* AWS EKSを利用する場合、こちらの[リンク](https://docs.aws.amazon.com/eks/latest/userguide/csi-iam-role.html)を参照し、Amazon EBS CSI pluginが正確にインストールしているかどうかを確認してください。
+* AWS EKSを利用する場合、下記のコマンドを実施し、Amazon EBS CSI pluginが正確にインストールしているかどうかを確認してください。
+
+```
+kubectl get sc
+NAME            PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+gp2             kubernetes.io/aws-ebs   Delete          WaitForFirstConsumer   false                  3d7h
+gp3 (default)   ebs.csi.aws.com         Retain          WaitForFirstConsumer   false                  2d22h
+```
 
 * 上記のPre-Flight Checkが問題なければ、Helmを利用してYB Anywhereのインストールに進みます。
 
 ## Helm Based Yugbayte Anywhere Installation
 Duration: 15:00
 
-* 以下の kubectl create namespace コマンドを実行してネームスペースを作成します（Yugabye EKSを利用する場合、tagは自社名に設定してください）：
+* 以下の`kubectl create namespace`コマンドを実行してネームスペース(具体的な名前は任意に指定してください)を作成します（Yugabye EKSを利用する場合、Yugabyteが提供するK8S ClusterとKubeconfigを利用するので、NSの作成はスキップしてください）：
 
 ```
-kubectl create namespace yb-platform-<tag>
+kubectl create namespace yb-platform
 ```
 
 * 以下の kubectl create コマンドを実行して、Yugabyte から取得した YugabyteDB Anywhere のシークレットを適用します：
@@ -131,6 +139,10 @@ touch yba-values.yaml
 
 ```
 # yba-values.yaml
+# RBAC is only needed when you uses Yugabyte provided EKS clsuter
+rbac:
+  create: false
+
 yugaware:
   # other values…
   resources:
@@ -142,8 +154,8 @@ prometheus:
   # other values…
   resources:
     requests:
-      cpu: "2"
-      memory: "4Gi"
+      cpu: "1"
+      memory: "2Gi"
 
 postgres:
   # other values…
@@ -153,12 +165,12 @@ postgres:
       memory: "2Gi"
 ```
 
-* 注意：上記の`values`で、YBAで5 vCPUを消費しますが、後程で作成するYugabyteDBは1 Nodeで4 vCPU（tserver + master）を消費しますので、合計で9 vCPUとなります。YBAとYugabyteDB clusterを同一Zoneにデプロイする場合、そのZoneのCPUリソースを十分に用意してください（m5.2xlargeの場合は最低そのZoneに2インスタンスが必要）。
+* 注意：上記の`values`で、YBAで4 vCPUを消費しますが、後程で作成するYugabyteDBは1 Nodeで4 vCPU（tserver + master）を消費しますので、合計で8 vCPUとなりますが、ノードにはKube System Podなどが入っているため、実際は8 vCPUのノードに同時に入ることはできません。従って、YBAとYugabyteDB clusterを同一Zoneにデプロイする場合、そのZoneのCPUリソースを十分に用意してください（m5.2xlargeの場合は最低そのZoneに2インスタンスが必要）。
 
 * 以下のhelm installコマンドを実行して、YugabyteDB Anywhere (yugaware) Helmチャートをインストールします：
 
 ```
-helm install yw-test yugabytedb/yugaware --version 2.19.3 -n yb-platform --values yba-values.yaml
+helm install yw-test yugabytedb/yugaware --version 2.19.3 -n yb-platform-<tag> --values yba-values.yaml
 ```
 
 * 以下のコマンドを使用し、サービスをチェックします：
@@ -199,6 +211,14 @@ kubectl logs --follow -n yb-platform yw-test-yugaware-0 yugaware
 # Cloud Configurationの作成
 Duration: 10:00
 
+## Cloud Providerを作成する
+
+### Cloud Providerとは
+
+* YugabyteDB Anywhereを使用してユニバースをデプロイする前に、プロバイダ構成を作成する必要があります。プロバイダ構成はKubernetes環境を記述します。プロバイダ構成はユニバースをデプロイする際の入力として使用され、多くのユニバースに再利用できます。
+
+### Cloud Providerを作成する手順
+
 * まずはAdmin Accountを作成します：
 
 ![Setup Page](pics/setup.png "Setup Page")
@@ -209,17 +229,13 @@ Duration: 10:00
     * EULAをチェックする.
     * Registerボタンをクッリクする.
 
-### Cloud Providerを作成する
-
-* YugabyteDB Anywhereを使用してユニバースをデプロイする前に、プロバイダ構成を作成する必要があります。
-
-* プロバイダ構成はKubernetes環境を記述します。プロバイダ構成はユニバースをデプロイする際の入力として使用され、多くのユニバースに再利用できます。
+* Admin Accountが作成した後、YBA UIにログインする。
 
 * Kubernetesプロバイダを作成する前に、以下のコマンドを実行してください：
     - `yugabyte-platform-universe-management`の service accountを作成する。
     - 作成されたService accountを利用し、`kubeconfig` を生成する。
 
-* Service Accountを作成するには、下記のコマンドを実行してください：
+* Service Accountを作成するには、下記のコマンドを実行してください(Yugabyte EKS Clusterを利用する場合、下記の部分をスキップし、`K8S Providerを作成する`の部分まで進んでください)：
 ```
 export YBA_NAMESPACE="yb-platform"
 
@@ -271,11 +287,20 @@ Generated the kubeconfig file: /tmp/yugabyte-platform-universe-management.conf
     1. `Configs > Managed Kubernetes Service > Create Kubernetes Config`をクリックし、`Create Kubernetes Provider Configuration`ページをOpenする。
     ![Create provider](pics/create-provider.png "Create provider")
     2. `Autofill local cluster config`をクリックし、必要なK8S config情報を自動入力する。
-    3. `Upload Kube Config File`をクリックし、先程作成された`kubeconfig`ファイルを選択する。
+    3. Yugabye EKS clusterを利用する場合、`Autofill local cluster config`の権限がないので、手動で入力する必要があります。
+       - `Kubernetes Provider Type`を`EKS`に指定する
+       - `Image Registry`を`quay.io/yugabyte/yugabyte`に指定する
+       - Secretファイルをアップロードする
+       - Kubeconfigファイルをアップロードする
+       - Regionsを追加し、`Asia Pacific (Tokyo)`を選択し、3つのAZを追加する
+       - AZのCode Nameはそれぞれ`ap-northeast-1a`、`ap-northeast-1c`、`ap-northeast-1d`で入力する
+       - AZの`Storage Classes`は`gp3`に設定する 
+       - AZの`Kube Namespace`はそれぞれ配れたNamespaceに設定する
+    4. `Upload Kube Config File`をクリックし、先程作成された`kubeconfig`ファイルを選択する。
     ![Provider Configuration](pics/provider-configuration.png "Provider Configuration")
-    4. たまに`StorageClass`情報が正確にロードしない場合もありますので、`Regions > View`をクリックし、`StorageClass`の情報を確認する。何もロードしていない場合は、手動で入力し（全てのRegionに入力する必要があり）、設定情報をアップデートする。 
+    5. たまに`StorageClass`情報が正確にロードしない場合もありますので、`Regions > View`をクリックし、`StorageClass`の情報を確認する。何もロードしていない場合は、手動で入力し（全てのRegionに入力する必要があり）、設定情報をアップデートする。 
     ![Storage Class](pics/sc.png "Storage Class")
-    5. `Create Provider Configuration`をクリックし、`K8S provider`を作成する。
+    6. `Create Provider Configuration`をクリックし、`K8S provider`を作成する。
     ![Provider Creation](pics/provider-creation.png "Provider Creation")
 
 * K8S Providerの作成が完了しました。
@@ -293,7 +318,7 @@ Duration: 20:00
     ![Create universe](pics/create-universe.png "Create universe")
     2. `Name`を入力し、`Provider`、`Regions`、`Total Pods`、`Replication Factors`は全部デフォルトの値に設定する。
     ![Universe Config](pics/universe-config.png "Universe Config")
-    3. `Instance Type`は`xsmall`、`Volume Info`は`50GB`に設定する。
+    3. `Instance Type`は`xsmall`、`Volume Info`は`25GB`に設定する。
     ![Instace Config](pics/instance-config.png "Instance Config")
     4. `YSQL Auth Password`を入力し、`Enable YCQL`のチェックを外します。
     ![Security Config](pics/security-config.png "Security Config")
@@ -347,3 +372,7 @@ total 3776
 -rw-r--r-- 1 yugabyte 10001  546266 Dec  4 05:00 audit.log
 -rw-r--r-- 1 yugabyte 10001 3196667 Dec  4 06:23 application.log
 ```
+
+* 今回のHands-on Workshopは以上となります。
+
+## Q&A
